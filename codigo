@@ -1,0 +1,108 @@
+!pip install streamlit
+
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+import zipfile
+import os
+
+from google.colab import files
+files.upload()
+
+dfs = []
+
+# -------------------------
+# TÍTULO
+# -------------------------
+st.title("📊 Comparativo de CDBs - Banco Master vs Mercado")
+
+# -------------------------
+# LEITURA DOS ZIPs (UPLOAD)
+# -------------------------
+dfs = []
+
+for arquivo in os.listdir():
+    if arquivo.endswith(".zip"):
+        print(f"\nLendo: {arquivo}")
+        
+        try:
+            with zipfile.ZipFile(arquivo) as z:
+                for nome_arquivo in z.namelist():
+                    if nome_arquivo.endswith(".csv"):
+                        print(f"  -> Abrindo: {nome_arquivo}")
+                        
+                        with z.open(nome_arquivo) as f:
+                            df_temp = pd.read_csv(
+                                f,
+                                sep=';',
+                                encoding='latin1',
+                                low_memory=False
+                            )
+                            
+                            df_temp["arquivo_origem"] = arquivo
+                            dfs.append(df_temp)
+
+        except Exception as e:
+            print(f"Erro no arquivo {arquivo}: {e}")
+
+
+# -------------------------
+# PROCESSAMENTO
+# -------------------------
+if dfs:
+    df_final = pd.concat(dfs, ignore_index=True)
+
+    print("Dados carregados:", df_final.shape)
+
+    # -------------------------
+    # AJUSTE AUTOMÁTICO DE COLUNAS
+    # -------------------------
+    coluna_ativo = [col for col in df_final.columns if "ATIVO" in col.upper()][0]
+    coluna_emissor = [col for col in df_final.columns if "EMISSOR" in col.upper()][0]
+
+    print("Coluna ativo:", coluna_ativo)
+    print("Coluna emissor:", coluna_emissor)
+
+    # -------------------------
+    # FILTRO CDB
+    # -------------------------
+    df_cdb = df_final[df_final[coluna_ativo].astype(str).str.contains("CDB", na=False)]
+
+    print("Total CDB:", df_cdb.shape)
+
+    # -------------------------
+    # MASTER vs OUTROS
+    # -------------------------
+    df_master = df_cdb[df_cdb[coluna_emissor].astype(str).str.contains("MASTER", na=False)]
+    df_outros = df_cdb[~df_cdb[coluna_emissor].astype(str).str.contains("MASTER", na=False)]
+
+    qtd_master = len(df_master)
+    qtd_outros = len(df_outros)
+
+    print("\nComparação:")
+    print("Master:", qtd_master)
+    print("Outros:", qtd_outros)
+
+    # -------------------------
+    # GRÁFICO
+    # -------------------------
+    plt.figure()
+    plt.bar(["Master", "Outros"], [qtd_master, qtd_outros])
+    plt.title("Comparação de CDBs")
+    plt.show()
+
+    # -------------------------
+    # RANKING
+    # -------------------------
+    ranking = df_cdb[coluna_emissor].value_counts().head(10)
+
+    print("\nTop 10 Bancos:")
+    print(ranking)
+
+    plt.figure()
+    ranking.plot(kind='bar')
+    plt.title("Top 10 Bancos")
+    plt.show()
+
+else:
+    print("Nenhum arquivo carregado")
