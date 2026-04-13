@@ -1,80 +1,97 @@
 import streamlit as st
-from utils import carregar_dados
 import pandas as pd
+import os
+from utils import carregar_dados
 
-st.set_page_config(page_title="Análise Banco Master", layout="wide")
-st.title("📊 Monitoramento de Ativos: Banco Master")
+# Configurações de persistência
+DB_FILE = "base_consolidada.parquet"
 
-# Função de cache para processar apenas quando os arquivos mudarem
-@st.cache_data(show_spinner="Processando arquivos novos...")
-def processar_arquivos(arquivos):
-    df = carregar_dados(arquivos)
+st.set_page_config(page_title="Análise Banco Master vs Sofisa", layout="wide")
+
+# Função para carregar a base salva
+def carregar_base_salva():
+    if os.path.exists(DB_FILE):
+        try:
+            return pd.read_parquet(DB_FILE)
+        except Exception:
+            return None
+    return None
+
+# Inicialização do Estado (Session State)
+if "df" not in st.session_state:
+    st.session_state["df"] = carregar_base_salva()
+
+st.title("📊 Pipeline de Dados: Master vs Sofisa")
+
+# Sidebar para novos uploads
+with st.sidebar:
+    st.header("⚙️ Configurações")
+    novos_arquivos = st.file_uploader("Adicionar novos ZIPs (CDA)", type="zip", accept_multiple_files=True)
     
-    if df.empty:
-        return df
+    if novos_arquivos:
+        with st.spinner("Processando e consolidando dados..."):
+            df_novo = carregar_dados(novos_arquivos)
+            
+            if st.session_state["df"] is not None:
+                # Concatenar e remover duplicados
+                df_final = pd.concat([st.session_state["df"], df_novo], ignore_index=True).drop_duplicates()
+            else:
+                df_final = df_novo
+            
+            # SALVAMENTO FORÇADO
+            df_final.to_parquet(DB_FILE, index=False)
+            st.session_state["df"] = df_final
+            st.success("Dados atualizados com sucesso!")
+            st.rerun() # Força a atualização da página para ler as novas colunas
 
-    # Tratamento de valores financeiros
-    # Identifica colunas que começam com VL_ (Valor)
-    cols_valor = [c for c in df.columns if "VL_" in c.upper()]
-    for col in cols_valor:
-        df[col] = (df[col].astype(str)
-                   .str.replace('.', '', regex=False)
-                   .str.replace(',', '.', regex=False))
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-    
-    return df
+    if st.button("🗑️ Resetar Base de Dados"):
+        if os.path.exists(DB_FILE): 
+            os.remove(DB_FILE)
+        st.session_state["df"] = None
+        st.rerun()
 
-# Sidebar para Upload
-uploaded_files = st.sidebar.file_uploader("Upload dos ZIPs (Arquivos CDA)", type="zip", accept_multiple_files=True)
-
-# Lógica Automática de Processamento
-if uploaded_files:
-    # Se houver novos ficheiros, processa e guarda no session_state
-    st.session_state["df"] = processar_arquivos(uploaded_files)
-else:
-    st.session_state["df"] = None
-
-# --- Exibição dos Dados ---
-df = st.session_state.get("df")
+# --- ÁREA DE EXIBIÇÃO (LÓGICA COMBINADA E SEGURA) ---
+df = st.session_state["df"]
 
 if df is not None and not df.empty:
-    # Filtra as linhas identificadas como Banco Master pela lógica do utils.py
-    master_df = df[df['IS_MASTER'] == True].copy()
+    # 1. Verificação de Segurança (Garante que as colunas existem no DF)
+    if 'IS_MASTER' not in df.columns:
+        df['IS_MASTER'] = False
+    if 'IS_SOFISA' not in df.columns:
+        df['IS_SOFISA'] = False
 
-    # Exibição de Métricas no Topo
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total de Linhas Lidas", f"{len(df):,}")
-    m2.metric("Registros Banco Master", len(master_df))
+    # 2. Filtros
+    master_df = df[df['IS_MASTER'] == True]
+    sofisa_df = df[df['IS_SOFISA'] == True]
+
+    # 3. Métricas em Colunas
+    c1, c2, c3 = st.columns(3)
     
-    if not master_df.empty:
-        # Tenta encontrar a coluna de Valor de Mercado
-        col_v = [c for c in master_df.columns if "VL_MERC" in c.upper()]
-        if col_v:
-            total_master = master_df[col_v[0]].sum()
-            m3.metric("Volume Total Master", f"R$ {total_master:,.2f}")
-        
-        st.success(f"Sucesso! Encontrámos ativos do Banco Master nos blocos processados.")
-        
-        # Seleção dinâmica de colunas para exibição (evita erro se a coluna não existir no bloco)
-        colunas_desejadas = [
-            'arquivo_origem', 'DT_COMPTC', 'EMISSOR', 'CNPJ_EMISSOR', 
-            'DT_EMISSAO', 'DT_INI_VIGENCIA', 'DT_VENC', 'VL_MERC_POS_FINAL'
-        ]
-        colunas_existentes = [c for c in colunas_desejadas if c in master_df.columns]
+    with c1:
+        st.metric("Registros Master", f"{len(master_df):,}")
+    
+    with c2:
+        st.metric("Registros Sofisa", f"{len(sofisa_df):,}")
+    
+    with c3:
+        # Tenta somar o volume se a coluna existir
+        col_v = [c for c in df.columns if "VL_MERC" in c.upper()]
+        if col_v and not master_df.empty:
+            vol_master = master_df[col_v[0]].sum()
+            st.metric("Volume Master", f"R$ {vol_master:,.2f}")
+        else:
+            st.metric("Volume Master", "R$ 0,00")
 
-        # Tabela com os dados do Master
-        st.subheader("📋 Detalhamento de Ativos: Banco Master")
-        st.dataframe(master_df[colunas_existentes], use_container_width=True)
-        
-        # Download dos dados filtrados
-        csv = master_df.to_csv(index=False, sep=';', encoding='latin1')
-        st.download_button("📥 Descarregar Tabela Master (CSV)", csv, "dados_master.csv", "text/csv")
+    st.divider()
+    
+    # 4. Preview dos Dados
+    st.subheader("🔍 Visualização dos Ativos (Top 100)")
+    # Mostra os dois bancos juntos para comparação rápida
+    df_preview = pd.concat([master_df, sofisa_df]).head(100)
+    
+    if not df_preview.empty:
+        st.dataframe(df_preview, use_container_width=True)
     else:
-        st.warning("⚠️ Ficheiros lidos com sucesso, mas o Banco Master (CNPJ 33.923.798) não foi encontrado nestes blocos.")
-        
-        # Debug para o usuário ver o que foi carregado
-        with st.expander("Ver amostra dos dados carregados (Primeiras 10 linhas)"):
-            st.write(df.head(10))
-            st.write("Colunas detetadas:", df.columns.tolist())
+        st.warning("Nenhum dado de Master ou Sofisa encontrado nos arquivos processados.")
 else:
-    st.info("👋 Bem-vindo! Por favor, faça o upload dos ficheiros ZIP na barra lateral para começar a análise.")
+    st.info("👋 A base de dados está vazia ou foi resetada. Por favor, suba os arquivos ZIP na barra lateral.")
