@@ -1,67 +1,63 @@
 import pandas as pd
 import zipfile
-import streamlit as st
-import sys
-import csv
+import io
+import re
+import streamlit as st  # <-- Faltava esta linha!
 
-# Aumenta o limite para evitar erro de campos muito longos
-csv.field_size_limit(sys.maxsize)
+# Identificadores de CNPJ Raiz (8 primeiros dígitos)
+CNPJ_MASTER_RAIZ = "33923798"
+CNPJ_SOFISA_RAIZ = "60889128"
 
-def carregar_dados(uploaded_files):
-    dfs = []
-    # Blocos que vamos ler (BLC_5 é onde o Master costuma estar)
-    BLOCOS_FOCO = ['BLC_1', 'BLC_4', 'BLC_5', 'PL', 'FIE'] 
-    CNPJ_MASTER_RAIZ = "33923798"
-
-    for arquivo in uploaded_files:
-        try:
-            with zipfile.ZipFile(arquivo) as z:
-                # Lista apenas os arquivos que batem com nossos blocos
-                csvs_alvo = [n for n in z.namelist() if any(b in n.upper() for b in BLOCOS_FOCO)]
-                
-                for nome_csv in csvs_alvo:
-                    with z.open(nome_csv) as f:
-                        # Lemos o arquivo completo
-                        df_temp = pd.read_csv(
-                            f, sep=";", encoding="latin1", dtype=str,
-                            on_bad_lines="skip", engine="python"
-                        )
-                        
-                        if df_temp.empty:
-                            continue
-                        
-                        # Adicionamos metadados
-                        df_temp["arquivo_origem"] = nome_csv
-                        
-                        # Criamos a coluna IS_MASTER varrendo TODAS as colunas
-                        # Isso resolve o problema de nomes de colunas diferentes (BLC_1 vs BLC_5)
-                        df_temp['IS_MASTER'] = False
-                        for col in df_temp.columns:
-                            c_upper = col.upper()
-                            # Busca por CNPJ em qualquer coluna que tenha 'CNPJ'
-                            if "CNPJ" in c_upper:
-                                cnpj_limpo = df_temp[col].str.replace(r'\D', '', regex=True)
-                                df_temp['IS_MASTER'] |= cnpj_limpo.str.contains(CNPJ_MASTER_RAIZ, na=False)
-                            
-                            # Busca por Nome em colunas de emissor ou denominação
-                            if any(x in c_upper for x in ["EMISSOR", "DENOM", "SOCIAL"]):
-                                df_temp['IS_MASTER'] |= df_temp[col].str.upper().str.contains("MASTER", na=False)
-                        
-                        dfs.append(df_temp)
-                        
-        except Exception as e:
-            st.error(f"Erro ao processar o ZIP {arquivo.name}: {e}")
-
-    if not dfs:
-        return pd.DataFrame()
-
-    # Une todos os arquivos lidos
-    df_final = pd.concat(dfs, ignore_index=True, sort=False)
+def carregar_dados(arquivos_zip):
+    lista_df = []
     
-    # Garante que a coluna Master seja booleana
-    if 'IS_MASTER' in df_final.columns:
-        df_final['IS_MASTER'] = df_final['IS_MASTER'].fillna(False).astype(bool)
-    else:
-        df_final['IS_MASTER'] = False
+    for arquivo_zip in arquivos_zip:
+        with zipfile.ZipFile(arquivo_zip, 'r') as z:
+            for nome_arquivo in z.namelist():
+                # Foca apenas nos arquivos CSV de dados
+                if nome_arquivo.endswith('.csv'):
+                    with z.open(nome_arquivo) as f:
+                        try:
+                            # Lógica robusta para evitar erros de "ParserError"
+                            df_temp = pd.read_csv(
+                                f, 
+                                sep=';', 
+                                encoding='latin1', 
+                                dtype=str, 
+                                on_bad_lines='skip', 
+                                low_memory=False
+                            )
+                            
+                            if df_temp.empty:
+                                continue
 
-    return df_final
+                            df_temp['arquivo_origem'] = nome_arquivo
+                            
+                            # Identifica colunas de CNPJ para Master e Sofisa
+                            cols_cnpj = [c for c in df_temp.columns if "CNPJ" in c.upper()]
+                            
+                            df_temp['IS_MASTER'] = False
+                            df_temp['IS_SOFISA'] = False
+                            
+                            for col in cols_cnpj:
+                                # Limpa pontuação e extrai os 8 dígitos iniciais
+                                cnpj_limpo = df_temp[col].str.replace(r'\D', '', regex=True).str[:8]
+                                df_temp.loc[cnpj_limpo == CNPJ_MASTER_RAIZ, 'IS_MASTER'] = True
+                                df_temp.loc[cnpj_limpo == CNPJ_SOFISA_RAIZ, 'IS_SOFISA'] = True
+                            
+                            # Tratamento de valores financeiros (troca vírgula por ponto)
+                            cols_valor = [c for c in df_temp.columns if "VL_MERC" in c.upper() or "VL_PATRIM" in c.upper()]
+                            for cv in cols_valor:
+                                df_temp[cv] = df_temp[cv].str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
+                                df_temp[cv] = pd.to_numeric(df_temp[cv], errors='coerce').fillna(0)
+                            
+                            lista_df.append(df_temp)
+                            
+                        except Exception as e:
+                            # Agora o 'st' vai funcionar aqui
+                            st.sidebar.warning(f"Aviso: Pulando {nome_arquivo} (Erro de formatação).")
+                            continue
+    
+    if lista_df:
+        return pd.concat(lista_df, ignore_index=True)
+    return pd.DataFrame()
